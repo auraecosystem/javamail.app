@@ -1,0 +1,586 @@
+Good. Let’s move into the actual v1 build contract.
+
+One correction from the earlier specification: I would pin the initial implementation to a stable Jakarta Mail/Angus combination rather than the 2.1.0-M1 milestone that currently appears on Maven Central. Maven Central shows Angus Mail 2.1.0-M1, while stable Angus releases in the 2.0.x line are also available; the exact production pin should be verified at implementation time and locked in the Maven build. 
+
+javamail.app v1 — implementation scaffold
+
+The repository should now become:
+
+javamail.app/
+├── pom.xml
+├── README.md
+├── LICENSE
+├── NOTICE
+├── SECURITY.md
+├── CONTRIBUTING.md
+├── CHANGELOG.md
+├── VERSION
+├── Makefile
+├── Dockerfile
+├── compose.yaml
+│
+├── .editorconfig
+├── .gitignore
+├── .gitattributes
+│
+├── .github/
+│   ├── CODEOWNERS
+│   ├── dependabot.yml
+│   └── workflows/
+│       ├── ci.yml
+│       ├── security.yml
+│       ├── docker.yml
+│       └── release.yml
+│
+├── docs/
+│   ├── ARCHITECTURE.md
+│   ├── API.md
+│   ├── CONFIGURATION.md
+│   ├── SECURITY.md
+│   ├── MAIL_PROTOCOLS.md
+│   ├── DEVELOPMENT.md
+│   ├── DEPLOYMENT.md
+│   └── archive/
+│       └── original-repository/
+│
+├── src/
+│   ├── main/
+│   │   ├── java/
+│   │   │   └── app/
+│   │   │       └── javamail/
+│   │   │           ├── Application.java
+│   │   │           ├── config/
+│   │   │           ├── domain/
+│   │   │           ├── mail/
+│   │   │           ├── auth/
+│   │   │           ├── security/
+│   │   │           ├── storage/
+│   │   │           ├── sync/
+│   │   │           ├── search/
+│   │   │           ├── api/
+│   │   │           └── observability/
+│   │   │
+│   │   └── resources/
+│   │       └── application.properties
+│   │
+│   └── test/
+│       ├── java/
+│       │   └── app/
+│       │       └── javamail/
+│       └── resources/
+│           └── fixtures/
+│
+└── scripts/
+    ├── dev.sh
+    ├── test.sh
+    └── security-scan.sh
+
+The original uploaded artifacts remain archived rather than being silently discarded.
+
+pom.xml
+
+The first implementation should establish Java 21 and the Jakarta Mail API/Angus provider boundary.
+
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="
+           http://maven.apache.org/POM/4.0.0
+           https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>app.javamail</groupId>
+    <artifactId>javamail.app</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <name>javamail.app</name>
+    <description>
+        Modern Jakarta Mail application infrastructure for SMTP, IMAP,
+        POP3, MIME, synchronization and secure mail processing.
+    </description>
+    <properties>
+        <java.version>21</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <jakarta.mail.version>2.1.5</jakarta.mail.version>
+        <angus.mail.version>2.0.5</angus.mail.version>
+        <junit.version>5.11.0</junit.version>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>jakarta.mail</groupId>
+            <artifactId>jakarta.mail-api</artifactId>
+            <version>${jakarta.mail.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.eclipse.angus</groupId>
+            <artifactId>angus-mail</artifactId>
+            <version>${angus.mail.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <release>${java.version}</release>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.0</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+
+The jakarta.mail-api artifact is the API boundary; Angus supplies the implementation/provider layer. Maven Central documents the Angus provider as org.eclipse.angus:angus-mail. 
+
+Core package
+
+app.javamail
+
+The first executable class:
+
+package app.javamail;
+public final class Application {
+    private Application() {
+    }
+    public static void main(String[] args) {
+        System.out.println("javamail.app v1");
+    }
+}
+
+That intentionally starts extremely small.
+
+The first milestone is not a giant framework. It is:
+
+compile
+  ↓
+start
+  ↓
+create mail session
+  ↓
+connect
+  ↓
+send/receive
+
+Configuration
+
+MailConfig.java:
+
+package app.javamail.config;
+public record MailConfig(
+        String smtpHost,
+        int smtpPort,
+        boolean smtpStartTls,
+        String imapHost,
+        int imapPort,
+        boolean imapStartTls,
+        String username
+) {
+}
+
+AppConfig.java:
+
+package app.javamail.config;
+public record AppConfig(
+        MailConfig mail
+) {
+    public static AppConfig defaults() {
+        return new AppConfig(
+                new MailConfig(
+                        "localhost",
+                        587,
+                        true,
+                        "localhost",
+                        143,
+                        true,
+                        ""
+                )
+        );
+    }
+}
+
+This gives us a configuration abstraction before introducing environment-variable parsing, secrets managers, or database-backed accounts.
+
+Domain model
+
+MessageAddress.java:
+
+package app.javamail.domain.message;
+public record MessageAddress(
+        String name,
+        String email
+) {
+}
+
+MessageId.java:
+
+package app.javamail.domain.message;
+public record MessageId(String value) {
+    public MessageId {
+        if (value == null || value.isBlank()) {
+            throw new IllegalArgumentException("Message ID cannot be blank");
+        }
+    }
+}
+
+MailMessage.java:
+
+package app.javamail.domain.message;
+import java.time.Instant;
+import java.util.List;
+public record MailMessage(
+        MessageId id,
+        String subject,
+        List<MessageAddress> from,
+        List<MessageAddress> to,
+        List<MessageAddress> cc,
+        String textBody,
+        String htmlBody,
+        List<MessageAttachment> attachments,
+        Instant sentAt,
+        Instant receivedAt,
+        String inReplyTo,
+        List<String> references
+) {
+}
+
+MessageAttachment.java:
+
+package app.javamail.domain.message;
+public record MessageAttachment(
+        String id,
+        String filename,
+        String contentType,
+        long size,
+        String sha256,
+        boolean inline
+) {
+}
+
+This is deliberately independent of jakarta.mail.Message.
+
+That distinction will matter later when we add storage, Web4 semantics, and LMLM processing.
+
+Mail provider boundary
+
+package app.javamail.mail;
+import app.javamail.domain.account.MailAccount;
+public interface MailProvider {
+    MailConnection connect(MailAccount account);
+}
+
+MailConnection:
+
+package app.javamail.mail;
+import java.io.Closeable;
+public interface MailConnection extends Closeable {
+    boolean isConnected();
+    @Override
+    void close();
+}
+
+Then:
+
+MailProvider
+    │
+    └── AngusMailProvider
+             │
+             └── Jakarta Mail
+                     │
+                     └── Angus
+
+This is the architectural seam we want.
+
+Account model
+
+package app.javamail.domain.account;
+public record MailAccount(
+        String id,
+        String email,
+        String displayName,
+        MailIdentity identity,
+        MailServerConfig incoming,
+        MailServerConfig outgoing
+) {
+}
+package app.javamail.domain.account;
+public record MailIdentity(
+        String displayName,
+        String email
+) {
+}
+package app.javamail.domain.account;
+public record MailServerConfig(
+        String host,
+        int port,
+        String protocol,
+        SecurityMode security,
+        AuthenticationMode authentication
+) {
+}
+package app.javamail.domain.account;
+public enum SecurityMode {
+    NONE,
+    STARTTLS,
+    TLS
+}
+package app.javamail.domain.account;
+public enum AuthenticationMode {
+    PASSWORD,
+    OAUTH2
+}
+
+SMTP service
+
+The application-facing interface:
+
+package app.javamail.mail.smtp;
+import app.javamail.domain.message.MailMessage;
+public interface SmtpClient {
+    void send(MailMessage message);
+}
+
+Implementation:
+
+package app.javamail.mail.smtp;
+import jakarta.mail.Session;
+import jakarta.mail.Transport;
+import jakarta.mail.internet.InternetAddress;
+import jakarta.mail.internet.MimeMessage;
+import app.javamail.domain.message.MailMessage;
+public final class AngusSmtpClient implements SmtpClient {
+    private final Session session;
+    public AngusSmtpClient(Session session) {
+        this.session = session;
+    }
+    @Override
+    public void send(MailMessage message) {
+        try {
+            MimeMessage mime = new MimeMessage(session);
+            mime.setSubject(message.subject(), "UTF-8");
+            if (!message.from().isEmpty()) {
+                var sender = message.from().getFirst();
+                mime.setFrom(
+                        new InternetAddress(
+                                sender.email(),
+                                sender.name(),
+                                "UTF-8"
+                        )
+                );
+            }
+            for (var recipient : message.to()) {
+                mime.addRecipient(
+                        jakarta.mail.Message.RecipientType.TO,
+                        new InternetAddress(
+                                recipient.email(),
+                                recipient.name(),
+                                "UTF-8"
+                        )
+                );
+            }
+            mime.setText(
+                    message.textBody() == null
+                            ? ""
+                            : message.textBody(),
+                    "UTF-8"
+            );
+            Transport.send(mime);
+        } catch (Exception e) {
+            throw new MailSendException(
+                    "Unable to send message",
+                    e
+            );
+        }
+    }
+}
+
+Exception:
+
+package app.javamail.mail.smtp;
+public final class MailSendException
+        extends RuntimeException {
+    public MailSendException(
+            String message,
+            Throwable cause
+    ) {
+        super(message, cause);
+    }
+}
+
+Now we have an actual mail path:
+
+MailMessage
+     ↓
+SmtpClient
+     ↓
+MimeMessage
+     ↓
+Transport
+     ↓
+SMTP
+
+IMAP boundary
+
+Next:
+
+package app.javamail.mail.imap;
+public interface ImapClient {
+    void connect();
+    void disconnect();
+    void synchronize();
+}
+
+Then the Angus implementation will own the Jakarta Mail Store and Folder objects.
+
+That keeps this:
+
+Store
+Folder
+Message
+FetchProfile
+SearchTerm
+
+out of the rest of the application.
+
+MIME boundary
+
+package app.javamail.mail.mime;
+import app.javamail.domain.message.MailMessage;
+public interface MimeParser {
+    MailMessage parse(
+            jakarta.mail.Message message
+    );
+}
+
+And:
+
+package app.javamail.mail.mime;
+import app.javamail.domain.message.MailMessage;
+public interface MimeBuilder {
+    jakarta.mail.internet.MimeMessage build(
+            jakarta.mail.Session session,
+            MailMessage message
+    );
+}
+
+This creates the clean boundary:
+
+Application Model
+       ↕
+MIME Adapter
+       ↕
+Jakarta Mail
+
+Security boundary
+
+package app.javamail.security;
+public record TlsPolicy(
+        boolean required,
+        boolean verifyCertificate
+) {
+}
+
+And:
+
+package app.javamail.security;
+public interface SecurityPolicy {
+    TlsPolicy tls();
+    long maximumMessageSize();
+    long maximumAttachmentSize();
+    boolean allowHtml();
+    boolean allowRemoteResources();
+}
+
+The important V1 rule
+
+No application code should look like this:
+
+Session session = Session.getInstance(...);
+Store store = session.getStore(...);
+Folder inbox = store.getFolder("INBOX");
+
+except inside the mail adapter layer.
+
+Instead:
+
+Application
+   ↓
+MailService
+   ↓
+ImapClient
+   ↓
+Angus
+   ↓
+Jakarta Mail
+
+That one decision will save us a lot of architectural cleanup later.
+
+Repository migration
+
+The existing ZIP should therefore be transformed like this:
+
+OLD
+─────────────────────
+README.md
+empty protocol/
+empty models/
+empty headers/
+old Info.plist
+mail artifacts
+
+into:
+
+NEW
+─────────────────────
+README.md
+pom.xml
+src/
+docs/
+tests
+Docker
+GitHub Actions
+mail engine
+security
+storage
+sync
+API
+
+while preserving the old snapshot:
+
+docs/archive/original-repository/
+
+First executable milestone
+
+The first working release target should be:
+
+javamail.app 0.1.0
+
+with exactly four verified capabilities:
+
+1. Build
+2. Create authenticated mail session
+3. Send SMTP message
+4. Connect to IMAP and enumerate mailbox
+
+Then:
+
+0.2.0 → MIME + attachments
+0.3.0 → IMAP synchronization
+0.4.0 → storage
+0.5.0 → REST API
+0.6.0 → security hardening
+0.7.0 → OAuth2/OpenPGP
+0.8.0 → observability
+0.9.0 → deployment/CI
+1.0.0 → production baseline
+
+After that, the next concrete step is to generate the complete repository files, not just snippets: pom.xml, all Java source files, tests, configuration, Docker, Compose, GitHub Actions, documentation, and the archive migration manifest. That will give us an actual buildable javamail.app v1 rather than another specification.
